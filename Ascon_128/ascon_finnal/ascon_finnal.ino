@@ -1,11 +1,10 @@
-//code đã có phần tính ram. 
-
 #include <Arduino.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <AsconESP32.h>
 #include "esp_system.h"
+
 // Khai báo cảm biến 
 #include <DHT.h>
 #include <TinyGPS++.h>
@@ -17,10 +16,8 @@ unsigned char sensordata[12] = {0};
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 #define MOVE 5
-
 int Ram_core_use0;
 int Ram_core_use1;
-
 #ifdef ESP32
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -34,15 +31,16 @@ int Ram_core_use1;
 
 // Benchmark code
 #define NUM_BLOCKS 1  // Giảm xuống để phù hợp với bộ nhớ Arduino
-#define BLOCK_SIZE 1000   // 16 bytes = 128 bits // đã thay đổi ở đây // b0
+#define BLOCK_SIZE 68   // 16 bytes = 128 bits // đã thay đổi ở đây // b0
 #define MESSAGE_SIZE  (NUM_BLOCKS * BLOCK_SIZE)
 #define MESSAGE_SIZE1 12
-// Biến toàn cục để theo dõi hiệu năng của các core
+
 struct CoreStats {
     float enc_throughput;
     float dec_throughput;
+    int ram_use;
     bool completed; 
-} core_stats[2] = {{0, 0, false}, {0, 0, false}};
+} core_stats[2] = {{0, 0, 0, false}, {0, 0, 0, false}};
 
 portMUX_TYPE statsMutex = portMUX_INITIALIZER_UNLOCKED;
 
@@ -81,10 +79,11 @@ void check_and_print_total() {
         float total_dec = core_stats[0].dec_throughput + core_stats[1].dec_throughput;
         
         Serial.println("\n=== Final System Performance ===");
-        Serial.printf("Core 0 - Encryption: %.2f MB/s, Decryption: %.2f MB/s\n", 
-            core_stats[0].enc_throughput, core_stats[0].dec_throughput);
-        Serial.printf("Core 1 - Encryption: %.2f MB/s, Decryption: %.2f MB/s\n", 
-            core_stats[1].enc_throughput, core_stats[1].dec_throughput);
+        
+        Serial.printf("Core 0 - Enc: %.2f MB/s, Dec: %.2f MB/s, RAM used: %d bytes\n", 
+        core_stats[0].enc_throughput, core_stats[0].dec_throughput, core_stats[0].ram_use);
+        Serial.printf("Core 1 - Enc: %.2f MB/s, Dec: %.2f MB/s, RAM used: %d bytes\n", 
+        core_stats[1].enc_throughput, core_stats[1].dec_throughput, core_stats[1].ram_use);
         Serial.println("--------------------");
         Serial.printf("Total Encryption Throughput: %.2f MB/s\n", total_enc);
         Serial.printf("Total Decryption Throughput: %.2f MB/s\n", total_dec);
@@ -113,9 +112,6 @@ void generate_nonce(unsigned char* nonce) {
         nonce[i] = (unsigned char)esp_random();  
     }
 }
-
-
-
 int freeRam() {
 #ifdef ESP32
     return ESP.getFreeHeap(); // Dùng cho ESP32
@@ -125,77 +121,6 @@ int freeRam() {
     return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval); // Dùng cho AVR
 #endif
 }
-
-
-
-
-void benchmark_ascon() {
-    // Test vectors
-    unsigned char key[CRYPTO_KEYBYTES] = {1};  // All zeros key for testing (note: only first byte set to 1 here)
-    unsigned char nonce[CRYPTO_NPUBBYTES] = {1};  // All zeros nonce
-    unsigned char ad[16] = {0};  // Associated data    // CÓ SỬA DATA ĐỂ KIỂM TRA THÌ SỬA Ở ĐÂY NÀY.
-    size_t adlen = sizeof(ad);
-    
-    // Allocate buffers
-    unsigned char* message = (unsigned char*)malloc(MESSAGE_SIZE);
-    unsigned char* ciphertext = (unsigned char*)malloc(MESSAGE_SIZE + CRYPTO_ABYTES);
-    unsigned char* decrypted = (unsigned char*)malloc(MESSAGE_SIZE);
-    
-    if (!message || !ciphertext || !decrypted) {
-        Serial.println("Memory allocation failed!");
-        if (message) free(message);
-        if (ciphertext) free(ciphertext);
-        if (decrypted) free(decrypted);
-        return;
-    }
-
-    // Initialize test message (if MESSAGE_SIZE > sizeof(custom_message) this will repeat/garbage;
-    // keep original intent but ensure no out-of-bounds)
-    unsigned char custom_message[8] = {'o','d','o','i','o','i',0,0}; // small example
-    for (size_t i = 0; i < MESSAGE_SIZE; ++i) {
-        message[i] = custom_message[i % sizeof(custom_message)];
-    }
-
-    // (cũ) Serial1.println(message[MESSAGE_SIZE]);  // <-- đây là bug (out-of-bounds). Thay bằng newline debug
-    Serial1.println(); // newline separator for any listeners
-
-    unsigned long long clen = 0, mlen = 0;
-    unsigned long start_time = 0, end_time = 0;
-
-    // Test encryption
-    start_time = micros();
-    crypto_aead_encrypt(ciphertext, &clen,
-                       message, MESSAGE_SIZE,
-                       ad, adlen,
-                       NULL,
-                       nonce, key);
-    end_time = micros();
-    print_results("Encryption", (uint64_t)(end_time - start_time), MESSAGE_SIZE);
-
-    // Test decryption
-    start_time = micros();
-    crypto_aead_decrypt(decrypted, &mlen,
-                       NULL,
-                       ciphertext, clen,
-                       ad, adlen,
-                       nonce, key);
-    end_time = micros();
-    print_results("Decryption", (uint64_t)(end_time - start_time), MESSAGE_SIZE);
-
-    // Verify decryption
-    if (mlen != MESSAGE_SIZE || memcmp(message, decrypted, MESSAGE_SIZE) != 0) {
-        Serial.println("ERROR: Decryption failed - messages don't match!");
-    } else {
-        Serial.println("Verification successful - decrypted message matches original");
-    }
-
-    // Free memory
-    free(message);
-    free(ciphertext);
-    free(decrypted);
-}
-
-// Đặt các hàm quan trọng vào IRAM
 void IRAM_ATTR benchmark_core(void* parameter) {
     int core_id = xPortGetCoreID();
 
@@ -211,6 +136,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     // Đọc dữ liệu cảm biến trước khi benchmark
     read_data_sensor();
     Print_datasensor();
+
 
     if (!message || !ciphertext || !decrypted) {
         Serial.printf("Core %d: Memory allocation failed!\n", core_id);
@@ -237,7 +163,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     size_t adlen = sizeof(ad);
 
     // Initialize message from sensordata
-    memcpy(message1, sensordata, MESSAGE_SIZE1);
+ 
    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
         message[i] = (unsigned char)i;
     }
@@ -246,8 +172,9 @@ void IRAM_ATTR benchmark_core(void* parameter) {
 
     // Warm up caches
     crypto_aead_encrypt(ciphertext, &clen, message, MESSAGE_SIZE, ad, adlen, NULL, nonce, key);
-    crypto_aead_encrypt(ciphertext1, &clen, message1, MESSAGE_SIZE1, ad, adlen, NULL, nonce, key);
+    crypto_aead_encrypt(ciphertext1, &clen, message, MESSAGE_SIZE1, ad, adlen, NULL, nonce, key);
    crypto_aead_decrypt(decrypted, &mlen, NULL, ciphertext, clen, ad, adlen, nonce, key);
+ 
 
     portDISABLE_INTERRUPTS();  // Disable interrupts for accurate timing
     
@@ -269,7 +196,8 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     end_time = esp_timer_get_time();
     portENABLE_INTERRUPTS();
     uint64_t dec_time = (end_time - start_time) / 10;
-
+int ramAfter=freeRam();
+int ramUsed = ramBefore - ramAfter;
     // Calculate throughputs
     float enc_throughput = (float)MESSAGE_SIZE / (enc_time / 1000000.0f) / (1024 * 1024);
     float dec_throughput = (float)MESSAGE_SIZE / (dec_time / 1000000.0f) / (1024 * 1024);
@@ -278,6 +206,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     portENTER_CRITICAL(&statsMutex);
     core_stats[core_id].enc_throughput = enc_throughput;
     core_stats[core_id].dec_throughput = dec_throughput;
+    core_stats[core_id].ram_use = ramUsed;
     core_stats[core_id].completed = true;
     portEXIT_CRITICAL(&statsMutex);
 
@@ -287,7 +216,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     print_results("Decryption", dec_time, MESSAGE_SIZE);
 
 
-int ramAfter=freeRam();
+
 
 /* ramBefore lượng ram còn trống trước khi chạy chương trình,ramAfter lượng ram còn trống sau khi chạy chương trình.
 => chạy chương trình ngốn Ram
@@ -322,10 +251,36 @@ Ram_core_use0=ramBefore-ramAfter;
     }
     
     check_and_print_total();
+ if(xPortGetCoreID()==0)   
+  {    
+    xSemaphoreTake(printSemaphore, portMAX_DELAY);   
+    Serial.printf("\n------------------");
+          Serial.printf("\n"); 
+            Serial.printf("Nonce (hex): "); 
+for (size_t i = 0; i < CRYPTO_NPUBBYTES; i++) {
+    Serial.printf("%02x", nonce[i]);
+     // In 16 byte mỗi dòng
+}
+    Serial.printf("\n");
+    Serial.printf("Ciphertext (hex): ", core_id);
 
+for (size_t i = 0; i < MESSAGE_SIZE1; i++) {
+    Serial.printf("%02x", ciphertext1[i]);
+    // In 16 byte ỗi dòng
+}
+Serial.printf("\n");
+Serial.printf("Tag (hex): ", core_id);
+
+for (size_t i = MESSAGE_SIZE1; i < MESSAGE_SIZE1 + CRYPTO_ABYTES; i++) {
+    Serial.printf("%02x", ciphertext1[i]);
+}
+Serial.printf("\n-----------");
+
+ xSemaphoreGive(printSemaphore);
+  }
     // === Gửi nonce / ciphertext / tag qua Serial1 =====
     // Chỉ gửi từ core 0 để tránh in nhiều lần
-    if (xPortGetCoreID() == 0) {
+     if (xPortGetCoreID()==0) {
         // Gửi 3 dòng: nonce, ciphertext (không gồm tag), tag
         Serial1.printf("\n"); 
 for (size_t i = 0; i < CRYPTO_NPUBBYTES; i++) {
@@ -343,8 +298,7 @@ Serial1.printf("\n");
 for (size_t i = MESSAGE_SIZE1; i < MESSAGE_SIZE1 + CRYPTO_ABYTES; i++) {
     Serial1.printf("%02x", ciphertext1[i]);
 }
-
-    }
+     }
 
     // Free memory
     heap_caps_free(message);

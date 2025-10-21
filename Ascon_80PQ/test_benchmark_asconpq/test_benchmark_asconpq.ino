@@ -28,8 +28,9 @@ int Ram_core_use1;
 struct CoreStats {
     float enc_throughput;
     float dec_throughput;
+    int ram_use;
     bool completed; 
-} core_stats[2] = {{0, 0, false}, {0, 0, false}};
+} core_stats[2] = {{0, 0, 0, false}, {0, 0, 0, false}};
 
 portMUX_TYPE statsMutex = portMUX_INITIALIZER_UNLOCKED;
 
@@ -68,10 +69,11 @@ void check_and_print_total() {
         float total_dec = core_stats[0].dec_throughput + core_stats[1].dec_throughput;
         
         Serial.println("\n=== Final System Performance ===");
-        Serial.printf("Core 0 - Encryption: %.2f MB/s, Decryption: %.2f MB/s\n", 
-            core_stats[0].enc_throughput, core_stats[0].dec_throughput);
-        Serial.printf("Core 1 - Encryption: %.2f MB/s, Decryption: %.2f MB/s\n", 
-            core_stats[1].enc_throughput, core_stats[1].dec_throughput);
+        
+        Serial.printf("Core 0 - Enc: %.2f MB/s, Dec: %.2f MB/s, RAM used: %d bytes\n", 
+        core_stats[0].enc_throughput, core_stats[0].dec_throughput, core_stats[0].ram_use);
+        Serial.printf("Core 1 - Enc: %.2f MB/s, Dec: %.2f MB/s, RAM used: %d bytes\n", 
+        core_stats[1].enc_throughput, core_stats[1].dec_throughput, core_stats[1].ram_use);
         Serial.println("--------------------");
         Serial.printf("Total Encryption Throughput: %.2f MB/s\n", total_enc);
         Serial.printf("Total Decryption Throughput: %.2f MB/s\n", total_dec);
@@ -176,7 +178,8 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     end_time = esp_timer_get_time();
     portENABLE_INTERRUPTS();
     uint64_t dec_time = (end_time - start_time) / 10;
-
+int ramAfter=freeRam();
+int ramUsed = ramBefore - ramAfter;
     // Calculate throughputs
     float enc_throughput = (float)MESSAGE_SIZE / (enc_time / 1000000.0f) / (1024 * 1024);
     float dec_throughput = (float)MESSAGE_SIZE / (dec_time / 1000000.0f) / (1024 * 1024);
@@ -185,6 +188,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     portENTER_CRITICAL(&statsMutex);
     core_stats[core_id].enc_throughput = enc_throughput;
     core_stats[core_id].dec_throughput = dec_throughput;
+    core_stats[core_id].ram_use = ramUsed;
     core_stats[core_id].completed = true;
     portEXIT_CRITICAL(&statsMutex);
 
@@ -194,7 +198,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     print_results("Decryption", dec_time, MESSAGE_SIZE);
 
 
-int ramAfter=freeRam();
+
 
 /* ramBefore lượng ram còn trống trước khi chạy chương trình,ramAfter lượng ram còn trống sau khi chạy chương trình.
 => chạy chương trình ngốn Ram

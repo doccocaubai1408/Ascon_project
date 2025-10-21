@@ -21,7 +21,7 @@ int Ram_core_use1;
 
 // Benchmark code
 #define NUM_BLOCKS 1  // Giảm xuống để phù hợp với bộ nhớ Arduino
-#define BLOCK_SIZE 2000   // 16 bytes = 128 bits // đã thay đổi ở đây // b0
+#define BLOCK_SIZE 1000   // 16 bytes = 128 bits // đã thay đổi ở đây // b0
 #define MESSAGE_SIZE  (NUM_BLOCKS * BLOCK_SIZE)
 
 struct CoreStats {
