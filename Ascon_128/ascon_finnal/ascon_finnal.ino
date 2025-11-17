@@ -7,10 +7,13 @@
 
 // Khai báo cảm biến 
 #include <DHT.h>
-#include <TinyGPS++.h>
+#include <TinyGPSPlus.h>
 TinyGPSPlus gps;
 
 unsigned char sensordata[12] = {0};
+// --- Biến toàn cục để lưu nonce và ciphertext cho in cuối ---
+
+
 #define LDR  34
 #define DHTPIN 32
 #define DHTTYPE DHT22
@@ -34,6 +37,8 @@ int Ram_core_use1;
 #define BLOCK_SIZE 68   // 16 bytes = 128 bits // đã thay đổi ở đây // b0
 #define MESSAGE_SIZE  (NUM_BLOCKS * BLOCK_SIZE)
 #define MESSAGE_SIZE1 12
+unsigned char nonce_global[CRYPTO_NPUBBYTES];
+unsigned char ciphertext_global[MESSAGE_SIZE1 + CRYPTO_ABYTES];
 
 struct CoreStats {
     float enc_throughput;
@@ -88,6 +93,24 @@ void check_and_print_total() {
         Serial.printf("Total Encryption Throughput: %.2f MB/s\n", total_enc);
         Serial.printf("Total Decryption Throughput: %.2f MB/s\n", total_dec);
         Serial.printf("Total Combined Throughput: %.2f MB/s\n", total_enc + total_dec);
+
+            Serial.printf("\n------------------");
+          Serial.printf("\n"); 
+// === In dữ liệu mã hóa sau cùng ===
+Serial.printf("\nNonce (hex): ");
+for (size_t i = 0; i < CRYPTO_NPUBBYTES; i++) {
+    Serial.printf("%02x", nonce_global[i]);
+}
+Serial.printf("\nCiphertext (hex): ");
+for (size_t i = 0; i < MESSAGE_SIZE1; i++) {
+    Serial.printf("%02x", ciphertext_global[i]);
+}
+Serial.printf("\nTag (hex): ");
+for (size_t i = MESSAGE_SIZE1; i < MESSAGE_SIZE1 + CRYPTO_ABYTES; i++) {
+    Serial.printf("%02x", ciphertext_global[i]);
+}
+
+
         Serial.println("--------------------\n");
     }
 }
@@ -98,11 +121,12 @@ void print_results(const char* operation, uint64_t time_us, size_t size) {
     float throughput = (float)size / (time_us / 1000000.0f); // bytes per second
     float mbps = throughput / (1024 * 1024); // convert to MB/s
     float cycles_per_byte = (float)(ESP.getCpuFreqMHz() * time_us) / (size ? size : 1);
-    
+    float latency_ms_per_byte = ((float)time_us / 1000.0f) / (size ? size : 1);
     Serial.printf("%s:\n", operation);
     Serial.printf("Time: %llu microseconds\n", time_us);
     Serial.printf("Throughput: %.2f MB/s\n", mbps);
     Serial.printf("Cycles/byte: %.2f\n", cycles_per_byte);
+    Serial.printf("Latency: %.6f ms/Byte\n", latency_ms_per_byte);
     Serial.println("--------------------");
     xSemaphoreGive(printSemaphore);
 }
@@ -125,6 +149,9 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     int core_id = xPortGetCoreID();
 
   int ramBefore = freeRam();
+      read_data_sensor();
+   
+
 
     unsigned char* message = (unsigned char*)heap_caps_malloc(MESSAGE_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     unsigned char* message1 = (unsigned char*)heap_caps_malloc(MESSAGE_SIZE1, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
@@ -133,9 +160,8 @@ void IRAM_ATTR benchmark_core(void* parameter) {
  
     unsigned char* decrypted = (unsigned char*)heap_caps_malloc(MESSAGE_SIZE, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
-    // Đọc dữ liệu cảm biến trước khi benchmark
-    read_data_sensor();
-    Print_datasensor();
+   
+  
 
 
     if (!message || !ciphertext || !decrypted) {
@@ -163,7 +189,7 @@ void IRAM_ATTR benchmark_core(void* parameter) {
     size_t adlen = sizeof(ad);
 
     // Initialize message from sensordata
- 
+ memcpy(message1, sensordata, MESSAGE_SIZE1);
    for (size_t i = 0; i < MESSAGE_SIZE; i++) {
         message[i] = (unsigned char)i;
     }
@@ -172,8 +198,15 @@ void IRAM_ATTR benchmark_core(void* parameter) {
 
     // Warm up caches
     crypto_aead_encrypt(ciphertext, &clen, message, MESSAGE_SIZE, ad, adlen, NULL, nonce, key);
-    crypto_aead_encrypt(ciphertext1, &clen, message, MESSAGE_SIZE1, ad, adlen, NULL, nonce, key);
+    crypto_aead_encrypt(ciphertext1, &clen, message1, MESSAGE_SIZE1, ad, adlen, NULL, nonce, key);
+
    crypto_aead_decrypt(decrypted, &mlen, NULL, ciphertext, clen, ad, adlen, nonce, key);
+
+if (core_id == 0) {
+    memcpy(nonce_global, nonce, CRYPTO_NPUBBYTES);
+    memcpy(ciphertext_global, ciphertext1, MESSAGE_SIZE1 + CRYPTO_ABYTES);
+}
+
  
 
     portDISABLE_INTERRUPTS();  // Disable interrupts for accurate timing
@@ -211,6 +244,10 @@ int ramUsed = ramBefore - ramAfter;
     portEXIT_CRITICAL(&statsMutex);
 
     // Print results for this core
+    if (core_id == 1) {
+    // In dữ liệu cảm biến trước khi in kết quả core 1
+    Print_datasensor();
+}
     Serial.printf("\n=== Results from Core %d ===\n", core_id);
     print_results("Encryption", enc_time, MESSAGE_SIZE);
     print_results("Decryption", dec_time, MESSAGE_SIZE);
@@ -251,33 +288,10 @@ Ram_core_use0=ramBefore-ramAfter;
     }
     
     check_and_print_total();
- if(xPortGetCoreID()==0)   
-  {    
-    xSemaphoreTake(printSemaphore, portMAX_DELAY);   
-    Serial.printf("\n------------------");
-          Serial.printf("\n"); 
-            Serial.printf("Nonce (hex): "); 
-for (size_t i = 0; i < CRYPTO_NPUBBYTES; i++) {
-    Serial.printf("%02x", nonce[i]);
-     // In 16 byte mỗi dòng
-}
-    Serial.printf("\n");
-    Serial.printf("Ciphertext (hex): ", core_id);
 
-for (size_t i = 0; i < MESSAGE_SIZE1; i++) {
-    Serial.printf("%02x", ciphertext1[i]);
-    // In 16 byte ỗi dòng
-}
-Serial.printf("\n");
-Serial.printf("Tag (hex): ", core_id);
 
-for (size_t i = MESSAGE_SIZE1; i < MESSAGE_SIZE1 + CRYPTO_ABYTES; i++) {
-    Serial.printf("%02x", ciphertext1[i]);
-}
-Serial.printf("\n-----------");
-
- xSemaphoreGive(printSemaphore);
-  }
+//  xSemaphoreGive(printSemaphore);
+//   }
     // === Gửi nonce / ciphertext / tag qua Serial1 =====
     // Chỉ gửi từ core 0 để tránh in nhiều lần
      if (xPortGetCoreID()==0) {
@@ -351,82 +365,110 @@ void setup() {
     benchmark_ascon();
     #endif
 }
-
-// Hàm chuyển đổi của gps.
 void convertToDMS(double decimalDegrees, bool isLatitude, int &degrees, int &minutes, double &seconds, char &direction) {
   if (decimalDegrees == 0.0) {
-    // Nếu không có dữ liệu (chưa cập nhật), đặt tất cả về 0
-    degrees = 0;
-    minutes = 0;
-    seconds = 0.0;
-    direction = isLatitude ? 'N' : 'E'; // Mặc định: North cho vĩ độ, East cho kinh độ
+    degrees = 0; minutes = 0; seconds = 0.0;
+    direction = isLatitude ? 'N' : 'E';
     return;
   }
 
-  // Xác định hướng
-  if (decimalDegrees >= 0) {
-    direction = isLatitude ? 'N' : 'E'; // North hoặc East
-  } else {
-    direction = isLatitude ? 'S' : 'W'; // South hoặc West
-    decimalDegrees = -decimalDegrees; // Chuyển thành số dương để tính toán
+  if (decimalDegrees >= 0)
+    direction = isLatitude ? 'N' : 'E';
+  else {
+    direction = isLatitude ? 'S' : 'W';
+    decimalDegrees = -decimalDegrees;
   }
 
-  // Tách độ, phút, giây
-  degrees = (int)decimalDegrees; // Phần nguyên là độ
-  double fractional = decimalDegrees - degrees; // Phần thập phân
-  minutes = (int)(fractional * 60); // Phần thập phân * 60 là phút
-  seconds = (fractional * 60 - minutes) * 60; // Phần thập phân của phút * 60 là giây
+  degrees = (int)decimalDegrees;
+  double fractional = decimalDegrees - degrees;
+  minutes = (int)(fractional * 60);
+  seconds = (fractional * 60 - minutes) * 60;
 }
+static int lastLatDeg = 0, lastLatMin = 0, lastLonDeg = 0, lastLonMin = 0;
+static int lastLatSecInt = 0, lastLonSecInt = 0;
+static char lastLatDir = 'N', lastLonDir = 'E';
+static double lastAltitude = 0;
+static unsigned long lastFixMillis = 0;
+const unsigned long FIX_STALE_MS = 10000UL; // 10s
+// Hàm chuyển đổi của gps.
 
 void read_data_sensor() {
-    uint8_t ldr_data = analogRead(LDR) / 16; // 0-4095 -> 0-255
-    uint8_t move_data = digitalRead(MOVE);
-    uint8_t humidity_data = dht.readHumidity();
-    uint8_t temperature_data = dht.readTemperature();
+  // Đọc cảm biến
+  uint8_t ldr_data = analogRead(LDR) / 16;
+  uint8_t move_data = digitalRead(MOVE);
+  uint8_t humidity_data = dht.readHumidity();
+  uint8_t temperature_data = dht.readTemperature();
 
-    // gps
-    int latDegrees = 0, latMinutes = 0, lonDegrees = 0, lonMinutes = 0;
-    double latSeconds = 0.0, lonSeconds = 0.0;
-    char latDirection = 'N', lonDirection = 'E';
+  // Chỉ core 0 đọc GPS
+  if (xPortGetCoreID() == 1) {
+    unsigned long start = millis();
+    bool gotUpdate = false;
+    unsigned long encodeStart = micros();
 
-    // Đọc tất cả byte từ Serial2 (GPS) để feed cho TinyGPS++
-    while (Serial2.available() > 0) {
-        char c = Serial2.read();
-        gps.encode(c);
+    while (millis() - start < 5000UL) { // đọc trong 5s
+      while (Serial2.available()) {
+        char c = (char)Serial2.read();
+        if (gps.encode(c)) gotUpdate = true;
+      }
+      if (gotUpdate && gps.location.isUpdated()) break;
+      taskYIELD();
     }
 
-    if (gps.location.isUpdated() || gps.location.isValid()) {
-        double latitude = gps.location.lat();
-        double longitude = gps.location.lng();
-        convertToDMS(latitude, true, latDegrees, latMinutes, latSeconds, latDirection);
-        convertToDMS(longitude, false, lonDegrees, lonMinutes, lonSeconds, lonDirection);
-    } else {
-        convertToDMS(0.0, true, latDegrees, latMinutes, latSeconds, latDirection);
-        convertToDMS(0.0, false, lonDegrees, lonMinutes, lonSeconds, lonDirection);
-    }
+    unsigned long encodeTime = micros() - encodeStart; // độ trễ encode
 
-    // Fill sensordata (giữ nguyên cấu trúc cũ)
- 
-     sensordata[0] = (unsigned char)ldr_data;
-    sensordata[1] = (unsigned char)move_data;
-    sensordata[2] = (unsigned char)temperature_data;
-    sensordata[3] = (unsigned char)humidity_data;
-    
-    // gps
-    sensordata[4] = (unsigned char)latDegrees;
-    sensordata[5] = (unsigned char)latMinutes;
-    sensordata[6] = (unsigned char)((int)latSeconds); // store integer seconds portion
-    sensordata[7] = (unsigned char)latDirection;
-    // kinh độ
-    sensordata[8] = (unsigned char)lonDegrees;
-    sensordata[9] = (unsigned char)lonMinutes;
-    sensordata[10] = (unsigned char)((int)lonSeconds);
-    sensordata[11] = (unsigned char)lonDirection;
+    if (gotUpdate && gps.location.isValid()) {
+      double lat = gps.location.lat();
+      double lon = gps.location.lng();
+      double alt = gps.altitude.meters();
+
+      int latDeg, latMin, lonDeg, lonMin;
+      double latSecD, lonSecD;
+      char latDir, lonDir;
+
+      convertToDMS(lat, true, latDeg, latMin, latSecD, latDir);
+      convertToDMS(lon, false, lonDeg, lonMin, lonSecD, lonDir);
+
+      lastLatDeg = latDeg;
+      lastLatMin = latMin;
+      lastLatSecInt = (int)latSecD;
+      lastLatDir = latDir;
+
+      lastLonDeg = lonDeg;
+      lastLonMin = lonMin;
+      lastLonSecInt = (int)lonSecD;
+      lastLonDir = lonDir;
+
+      lastAltitude = alt;
+      lastFixMillis = millis();
+
+      
+  }
+  }
+
+  // Ghi dữ liệu cảm biến và tọa độ vào mảng
+  sensordata[0] = (unsigned char)ldr_data;
+  sensordata[1] = (unsigned char)move_data;
+  sensordata[2] = (unsigned char)temperature_data;
+  sensordata[3] = (unsigned char)humidity_data;
+
+  sensordata[4] = (unsigned char)lastLatDeg;
+  sensordata[5] = (unsigned char)lastLatMin;
+  sensordata[6] = (unsigned char)lastLatSecInt;
+  sensordata[7] = (unsigned char)lastLatDir;
+
+  sensordata[8] = (unsigned char)lastLonDeg;
+  sensordata[9] = (unsigned char)lastLonMin;
+  sensordata[10] = (unsigned char)lastLonSecInt;
+  sensordata[11] = (unsigned char)lastLonDir;
 }
 
+// ----------------- In dữ liệu -----------------
+
+
+
 void Print_datasensor() {
-    if (xPortGetCoreID() == 0) {
-        xSemaphoreTake(printSemaphore, portMAX_DELAY);
+    //if (xPortGetCoreID() == 0) {
+      //  xSemaphoreTake(printSemaphore, portMAX_DELAY);
         Serial.printf("---------------------");
         Serial.printf("\n Ánh sáng: %d   ", sensordata[0]);
         Serial.printf("Chuyển động:  %d    ", sensordata[1]);
@@ -443,8 +485,8 @@ void Print_datasensor() {
         Serial.printf(" %d giây ", sensordata[10]);
         Serial.printf(" Hướng: %c  \n", sensordata[11]);
         Serial.printf("---------------------\n");
-        xSemaphoreGive(printSemaphore);
-    }
+     //   xSemaphoreGive(printSemaphore);
+   // }
 }
 
 void loop() {
