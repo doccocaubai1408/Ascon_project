@@ -394,13 +394,14 @@ const unsigned long FIX_STALE_MS = 10000UL; // 10s
 
 void read_data_sensor() {
   // Đọc cảm biến
+   if (xPortGetCoreID() == 1) {
   uint8_t ldr_data = analogRead(LDR) / 16;
   uint8_t move_data = digitalRead(MOVE);
   uint8_t humidity_data = dht.readHumidity();
   uint8_t temperature_data = dht.readTemperature();
 
   // Chỉ core 0 đọc GPS
-  if (xPortGetCoreID() == 1) {
+ 
     unsigned long start = millis();
     bool gotUpdate = false;
     unsigned long encodeStart = micros();
@@ -443,7 +444,7 @@ void read_data_sensor() {
 
       
   }
-  }
+  
 
   // Ghi dữ liệu cảm biến và tọa độ vào mảng
   sensordata[0] = (unsigned char)ldr_data;
@@ -460,6 +461,7 @@ void read_data_sensor() {
   sensordata[9] = (unsigned char)lastLonMin;
   sensordata[10] = (unsigned char)lastLonSecInt;
   sensordata[11] = (unsigned char)lastLonDir;
+   }
 }
 
 // ----------------- In dữ liệu -----------------
